@@ -38,8 +38,8 @@
 </style>
 </head>
 <body>
-<h1><span class="gold">Gold ETF</span> Holdings Tracker — GLD &middot; GLDM &middot; SGLN</h1>
-<div class="sub" id="subline">SPDR Gold Shares &middot; SPDR Gold MiniShares &middot; iShares Physical Gold ETC</div>
+<h1><span class="gold">Gold ETF</span> Holdings Tracker — GLD &middot; GLDM &middot; SGLN &middot; IAU</h1>
+<div class="sub" id="subline">SPDR Gold Shares &middot; SPDR Gold MiniShares &middot; iShares Physical Gold ETC &middot; iShares Gold Trust</div>
 
 <div id="status">Loading data&hellip;</div>
 
@@ -66,8 +66,9 @@
   </table>
   <div class="src">
     Sources: <a href="https://www.spdrgoldshares.com/usa/historical-data/" target="_blank" rel="noopener">spdrgoldshares.com</a> (GLD, GLDM — fetched live on page load) &middot;
-    <a href="https://www.ishares.com/uk/individual/en/products/258441/ishares-physical-gold-etc-fund" target="_blank" rel="noopener">ishares.com</a> (SGLN — daily snapshot<span id="sglnDate"></span>).
+    <a href="https://www.ishares.com/uk/individual/en/products/258441/ishares-physical-gold-etc-fund" target="_blank" rel="noopener">ishares.com</a> (SGLN, IAU — daily snapshot<span id="sglnDate"></span>).
     Net flow = day-over-day change in metal held. SGLN tonnes derived from Securities In Issue &times; metal entitlement.
+    IAU tonnes = total net assets &divide; LBMA gold price; IAU history Feb 2025 &ndash; Jun 2026 is unavailable (iShares removed the historical file in their 2025 site redesign) — flows in that window show as "—".
   </div>
 </div>
 </div>
@@ -80,6 +81,7 @@ const FUNDS = [
   { key: "gld",  name: "GLD",  color: "#d4a843" },
   { key: "gldm", name: "GLDM", color: "#5b9bd5" },
   { key: "sgln", name: "SGLN", color: "#9b7fd4" },
+  { key: "iau",  name: "IAU",  color: "#4db6a0" },
 ];
 const fmt = (n, d = 2) => n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
 
@@ -117,15 +119,21 @@ function buildUnion() {
   const dates = [...new Set(FUNDS.flatMap((f) => (DATA[f.key] || []).map((r) => r.date)))].sort();
   const maps = {};
   FUNDS.forEach((f) => { maps[f.key] = Object.fromEntries((DATA[f.key] || []).map((r) => [r.date, r])); });
-  const lastTonnes = {};
+  const lastTonnes = {}, lastDate = {};
+  const dayGap = (a, b) => (new Date(b) - new Date(a)) / 86400000;
   UNION = dates.map((d) => {
     const row = { date: d, totalFlow: 0, totalTonnes: 0 };
     FUNDS.forEach((f) => {
       const r = maps[f.key][d];
-      if (r) { lastTonnes[f.key] = r.tonnes; row[f.key] = r; row.totalFlow += r.flowTonnes; }
-      else row[f.key] = null;
-      if (lastTonnes[f.key] != null) row.totalTonnes += lastTonnes[f.key];
-      row[f.key + "_t"] = lastTonnes[f.key] ?? null; // fill-forward for charts
+      if (r) {
+        lastTonnes[f.key] = r.tonnes; lastDate[f.key] = d;
+        row[f.key] = r;
+        if (r.flowTonnes != null) row.totalFlow += r.flowTonnes;
+      } else row[f.key] = null;
+      // fill-forward for charts/totals, but go stale (null) after 7 days without data
+      const fresh = lastDate[f.key] != null && dayGap(lastDate[f.key], d) <= 7;
+      row[f.key + "_t"] = fresh ? lastTonnes[f.key] : null;
+      if (fresh) row.totalTonnes += lastTonnes[f.key];
     });
     row.totalFlow = +row.totalFlow.toFixed(2);
     row.totalTonnes = +row.totalTonnes.toFixed(2);
@@ -134,7 +142,13 @@ function buildUnion() {
 }
 
 function sumFlow(key, fromDate) {
-  return +(DATA[key] || []).filter((r) => r.date >= fromDate).reduce((s, r) => s + r.flowTonnes, 0).toFixed(2);
+  return +(DATA[key] || []).filter((r) => r.date >= fromDate && r.flowTonnes != null)
+    .reduce((s, r) => s + r.flowTonnes, 0).toFixed(2);
+}
+// a fund's period flow is only meaningful if its data covers the period start
+function coversFrom(key, fromDate) {
+  const limit = new Date(new Date(fromDate).getTime() + 10 * 86400000).toISOString().slice(0, 10);
+  return (DATA[key] || []).some((r) => r.date >= fromDate && r.date <= limit);
 }
 
 function card(label, valueHtml, detail, accent) {
@@ -142,6 +156,7 @@ function card(label, valueHtml, detail, accent) {
     '</div><div class="value">' + valueHtml + '</div><div class="detail">' + detail + "</div></div>";
 }
 function signed(v, suffix) {
+  if (v == null) return "—";
   const cls = v >= 0 ? "pos" : "neg", sign = v >= 0 ? "+" : "";
   return '<span class="' + cls + '">' + sign + fmt(v) + (suffix || " t") + "</span>";
 }
@@ -152,7 +167,7 @@ function render() {
   const year = latest.date.slice(0, 4), month = latest.date.slice(0, 7);
 
   let cardsHtml = card("Combined holdings", fmt(latest.totalTonnes) + " t",
-    "GLD + GLDM + SGLN &middot; " + latest.date);
+    FUNDS.map((f) => f.name).join(" + ") + " &middot; " + latest.date);
   const totalYtd = FUNDS.reduce((s, f) => s + sumFlow(f.key, year + "-01-01"), 0);
   const totalMtd = FUNDS.reduce((s, f) => s + sumFlow(f.key, month + "-01"), 0);
   cardsHtml += card("Combined MTD / YTD flow", signed(totalMtd) + " / " + signed(totalYtd), "since " + month + "-01 / " + year + "-01-01");
@@ -160,8 +175,9 @@ function render() {
     const recs = DATA[f.key];
     if (!recs || !recs.length) return;
     const last = recs[recs.length - 1];
+    const ytd = coversFrom(f.key, year + "-01-01") ? signed(sumFlow(f.key, year + "-01-01")) : "—";
     cardsHtml += card(f.name + " holdings", fmt(last.tonnes) + " t",
-      "day " + signed(last.flowTonnes) + " &middot; YTD " + signed(sumFlow(f.key, year + "-01-01")) + " &middot; " + last.date, f.color);
+      "day " + signed(last.flowTonnes) + " &middot; YTD " + ytd + " &middot; " + last.date, f.color);
   });
   document.getElementById("cards").innerHTML = cardsHtml;
 
@@ -174,6 +190,7 @@ function render() {
     const cells = FUNDS.map((f) => {
       const r = row[f.key];
       if (!r) return "<td>—</td><td>—</td>";
+      if (r.flowTonnes == null) return "<td>" + fmt(r.tonnes) + "</td><td>—</td>";
       const cls = r.flowTonnes >= 0 ? "pos" : "neg", sign = r.flowTonnes >= 0 ? "+" : "";
       return "<td>" + fmt(r.tonnes) + "</td><td class='" + cls + "'>" + sign + fmt(r.flowTonnes) + "</td>";
     }).join("");
@@ -224,7 +241,7 @@ function drawFlow(rangeKey) {
   flowChart = new Chart(document.getElementById("flowChart"), {
     type: "bar",
     data: { labels: d.map((r) => r.date), datasets: FUNDS.map((f) => ({
-      label: f.name, data: d.map((r) => (r[f.key] ? r[f.key].flowTonnes : 0)),
+      label: f.name, data: d.map((r) => (r[f.key] && r[f.key].flowTonnes != null ? r[f.key].flowTonnes : 0)),
       backgroundColor: f.color, stack: "flow",
     })) },
     options: { responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
@@ -281,7 +298,7 @@ async function load() {
   }
   render();
   document.getElementById("subline").innerHTML =
-    "SPDR Gold Shares &middot; SPDR Gold MiniShares &middot; iShares Physical Gold ETC" +
+    "GLD &middot; GLDM &middot; SGLN &middot; IAU" +
     (live ? " &middot; GLD/GLDM: live" : ' &middot; <span class="neg">live fetch failed — snapshot only</span>') +
     snapshotInfo + " &middot; loaded " + new Date().toLocaleString();
 }
