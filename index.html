@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GLD Holdings Tracker — SPDR Gold Trust</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<style>
+  :root { --bg:#0f1419; --card:#1a2129; --text:#e6e8ea; --muted:#8b949e; --green:#2ea05f; --red:#d9534f; --gold:#d4a843; --border:#2d3640; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--text); font:14px/1.5 "Segoe UI",system-ui,sans-serif; padding:24px; }
+  h1 { font-size:20px; font-weight:600; } h1 .gold { color:var(--gold); }
+  .sub { color:var(--muted); font-size:12px; margin:4px 0 20px; }
+  #status { padding:40px; text-align:center; color:var(--muted); }
+  #status.error { color:var(--red); }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:12px; margin-bottom:20px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
+  .card .label { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
+  .card .value { font-size:24px; font-weight:700; margin-top:4px; }
+  .card .detail { color:var(--muted); font-size:12px; margin-top:2px; }
+  .pos { color:var(--green); } .neg { color:var(--red); }
+  .panel { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:18px; margin-bottom:20px; }
+  .panel h2 { font-size:14px; font-weight:600; margin-bottom:10px; }
+  .ranges { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
+  .ranges button { background:transparent; color:var(--muted); border:1px solid var(--border); border-radius:6px; padding:4px 12px; cursor:pointer; font-size:12px; }
+  .ranges button.active { background:var(--gold); color:#1a1408; border-color:var(--gold); font-weight:600; }
+  .chartbox { position:relative; height:340px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:right; color:var(--muted); font-weight:600; padding:8px 10px; border-bottom:1px solid var(--border); font-size:11px; text-transform:uppercase; letter-spacing:.4px; }
+  td { text-align:right; padding:7px 10px; border-bottom:1px solid var(--border); font-variant-numeric:tabular-nums; }
+  th:first-child, td:first-child { text-align:left; }
+  tr:hover td { background:rgba(212,168,67,.05); }
+  .src { color:var(--muted); font-size:11px; margin-top:8px; }
+  a { color:var(--gold); }
+  #app { display:none; }
+</style>
+</head>
+<body>
+<h1><span class="gold">GLD</span> Holdings Tracker — SPDR&reg; Gold Trust</h1>
+<div class="sub" id="subline">Live data from the official SPDR Gold Shares archive</div>
+
+<div id="status">Loading latest SPDR data&hellip;</div>
+
+<div id="app">
+<div class="cards" id="cards"></div>
+
+<div class="panel">
+  <h2>Total holdings (tonnes) vs GLD price</h2>
+  <div class="ranges" id="ranges1"></div>
+  <div class="chartbox"><canvas id="holdChart"></canvas></div>
+</div>
+
+<div class="panel">
+  <h2>Daily net flow (tonnes) — green = net buy, red = net sell</h2>
+  <div class="ranges" id="ranges2"></div>
+  <div class="chartbox"><canvas id="flowChart"></canvas></div>
+</div>
+
+<div class="panel">
+  <h2>Last 30 trading days</h2>
+  <table id="tbl">
+    <thead><tr><th>Date</th><th>Tonnes</th><th>Total oz</th><th>Net flow (t)</th><th>Net flow (oz)</th><th>GLD close</th><th>Volume</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div class="src">Source: <a href="https://www.spdrgoldshares.com/usa/historical-data/" target="_blank" rel="noopener">spdrgoldshares.com — historical data</a> (fetched live on page load). Net flow = change in Total Ounces of Gold in the Trust vs previous trading day.</div>
+</div>
+</div>
+
+<script>
+const SRC_URL = "https://api.spdrgoldshares.com/api/v1/historical-archive?product=gld&exchange=NYSE&lang=en";
+const MONTHS = { Jan:"01",Feb:"02",Mar:"03",Apr:"04",May:"05",Jun:"06",Jul:"07",Aug:"08",Sep:"09",Oct:"10",Nov:"11",Dec:"12" };
+const RANGES = { "1M": 22, "3M": 66, "6M": 132, "1Y": 252, "3Y": 756, "5Y": 1260, "All": Infinity };
+const fmt = (n, d = 2) => n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+
+let DATA = [];
+
+function parseWorkbook(ab) {
+  const wb = XLSX.read(ab, { type: "array" });
+  const sheetName = wb.SheetNames.find((n) => /historical archive/i.test(n));
+  if (!sheetName) throw new Error("Archive sheet not found in SPDR file");
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1 });
+  const records = [];
+  for (const r of rows.slice(1)) {
+    if (!r || !r[0]) continue;
+    const totalOz = r[8], tonnes = r[9];
+    if (typeof totalOz !== "number" || typeof tonnes !== "number") continue;
+    const m = String(r[0]).match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);
+    if (!m || !MONTHS[m[2]]) continue;
+    records.push({
+      date: m[3] + "-" + MONTHS[m[2]] + "-" + m[1].padStart(2, "0"),
+      close: typeof r[1] === "number" ? r[1] : null,
+      volume: typeof r[7] === "number" ? r[7] : null,
+      totalOz, tonnes,
+    });
+  }
+  records.sort((a, b) => a.date.localeCompare(b.date));
+  for (let i = 0; i < records.length; i++) {
+    const prev = records[i - 1];
+    records[i].flowOz = prev ? +(records[i].totalOz - prev.totalOz).toFixed(2) : 0;
+    records[i].flowTonnes = prev ? +(records[i].tonnes - prev.tonnes).toFixed(2) : 0;
+  }
+  return records;
+}
+
+function sumFlow(fromDate) {
+  return +DATA.filter((r) => r.date >= fromDate).reduce((s, r) => s + r.flowTonnes, 0).toFixed(2);
+}
+
+function card(label, valueHtml, detail) {
+  return '<div class="card"><div class="label">' + label + '</div><div class="value">' + valueHtml + '</div><div class="detail">' + detail + "</div></div>";
+}
+
+function signed(v) {
+  const cls = v >= 0 ? "pos" : "neg", sign = v >= 0 ? "+" : "";
+  return '<span class="' + cls + '">' + sign + fmt(v) + " t</span>";
+}
+
+function render() {
+  const s = DATA[DATA.length - 1];
+  const month = s.date.slice(0, 7), year = s.date.slice(0, 4);
+  const mtd = sumFlow(month + "-01"), ytd = sumFlow(year + "-01-01");
+  document.getElementById("subline").innerHTML =
+    "Live data from the official SPDR Gold Shares archive &middot; Latest trading day: <b>" + s.date + "</b> &middot; Loaded: " + new Date().toLocaleString();
+  document.getElementById("cards").innerHTML =
+    card("Total holdings", fmt(s.tonnes) + " t", fmt(s.totalOz, 0) + " oz") +
+    card("Last day net flow", signed(s.flowTonnes), (s.flowTonnes >= 0 ? "net BUY" : "net SELL") + " on " + s.date) +
+    card("Month-to-date flow", signed(mtd), "since " + month + "-01") +
+    card("Year-to-date flow", signed(ytd), "since " + year + "-01-01") +
+    card("GLD close", "$" + fmt(s.close ?? 0), "NYSE Arca");
+
+  buildRanges(document.getElementById("ranges1"), drawHold, "1Y");
+  buildRanges(document.getElementById("ranges2"), drawFlow, "3M");
+
+  const tbody = document.querySelector("#tbl tbody");
+  tbody.innerHTML = "";
+  DATA.slice(-30).reverse().forEach((r) => {
+    const tr = document.createElement("tr");
+    const cls = r.flowTonnes >= 0 ? "pos" : "neg", sign = r.flowTonnes >= 0 ? "+" : "";
+    tr.innerHTML = "<td>" + r.date + "</td><td>" + fmt(r.tonnes) + "</td><td>" + fmt(r.totalOz, 0) + "</td>" +
+      "<td class='" + cls + "'>" + sign + fmt(r.flowTonnes) + "</td><td class='" + cls + "'>" + sign + fmt(r.flowOz, 0) + "</td>" +
+      "<td>" + (r.close != null ? "$" + fmt(r.close) : "—") + "</td><td>" + (r.volume != null ? fmt(r.volume, 0) : "—") + "</td>";
+    tbody.appendChild(tr);
+  });
+
+  document.getElementById("status").style.display = "none";
+  document.getElementById("app").style.display = "block";
+}
+
+const sliceData = (n) => (n === Infinity ? DATA : DATA.slice(-n));
+let holdChart, flowChart;
+
+function drawHold(rangeKey) {
+  const d = sliceData(RANGES[rangeKey]);
+  if (holdChart) holdChart.destroy();
+  holdChart = new Chart(document.getElementById("holdChart"), {
+    type: "line",
+    data: { labels: d.map((r) => r.date), datasets: [
+      { label: "Holdings (t)", data: d.map((r) => r.tonnes), borderColor: "#d4a843", backgroundColor: "rgba(212,168,67,.12)", fill: true, pointRadius: 0, borderWidth: 1.6, yAxisID: "y", tension: .1 },
+      { label: "GLD close ($)", data: d.map((r) => r.close), borderColor: "#5b9bd5", pointRadius: 0, borderWidth: 1.2, yAxisID: "y2", tension: .1 },
+    ]},
+    options: { responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
+      plugins: { legend: { labels: { color: "#8b949e", boxWidth: 12 } } },
+      scales: {
+        x: { ticks: { color: "#8b949e", maxTicksLimit: 10 }, grid: { color: "#2d3640" } },
+        y: { title: { display: true, text: "tonnes", color: "#8b949e" }, ticks: { color: "#d4a843" }, grid: { color: "#2d3640" } },
+        y2: { position: "right", title: { display: true, text: "USD", color: "#8b949e" }, ticks: { color: "#5b9bd5" }, grid: { display: false } },
+      } }
+  });
+}
+
+function drawFlow(rangeKey) {
+  const d = sliceData(RANGES[rangeKey]);
+  if (flowChart) flowChart.destroy();
+  flowChart = new Chart(document.getElementById("flowChart"), {
+    type: "bar",
+    data: { labels: d.map((r) => r.date), datasets: [{ label: "Net flow (t)", data: d.map((r) => r.flowTonnes),
+      backgroundColor: d.map((r) => (r.flowTonnes >= 0 ? "rgba(46,160,95,.8)" : "rgba(217,83,79,.8)")) }] },
+    options: { responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c) => (c.raw >= 0 ? "+" : "") + fmt(c.raw) + " t (" + (c.raw >= 0 ? "net buy" : "net sell") + ")" } } },
+      scales: { x: { ticks: { color: "#8b949e", maxTicksLimit: 10 }, grid: { display: false } },
+                y: { title: { display: true, text: "tonnes", color: "#8b949e" }, ticks: { color: "#8b949e" }, grid: { color: "#2d3640" } } } }
+  });
+}
+
+function buildRanges(el, draw, def) {
+  el.innerHTML = "";
+  Object.keys(RANGES).forEach((k) => {
+    const b = document.createElement("button");
+    b.textContent = k;
+    if (k === def) b.classList.add("active");
+    b.onclick = () => { el.querySelectorAll("button").forEach((x) => x.classList.remove("active")); b.classList.add("active"); draw(k); };
+    el.appendChild(b);
+  });
+  draw(def);
+}
+
+async function load() {
+  try {
+    const res = await fetch(SRC_URL);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    DATA = parseWorkbook(await res.arrayBuffer());
+    if (!DATA.length) throw new Error("No rows parsed from SPDR file");
+    render();
+  } catch (e) {
+    // live fetch failed (network block / API change) — fall back to bundled snapshot if present
+    try {
+      const res = await fetch("data.json");
+      if (!res.ok) throw e;
+      DATA = await res.json();
+      render();
+      document.getElementById("subline").innerHTML += ' &middot; <span class="neg">live fetch failed — showing last saved snapshot</span>';
+    } catch (_) {
+      const st = document.getElementById("status");
+      st.className = "error";
+      st.textContent = "Failed to load SPDR data: " + e.message + " — check your network connection or try again later.";
+    }
+  }
+}
+load();
+</script>
+</body>
+</html>
